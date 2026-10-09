@@ -187,7 +187,7 @@ def find_by_path(ctx, path, **kwargs):
 @json_input_options
 @click.pass_context
 def collections(ctx, **kwargs):
-    """List collections in catalog"""
+    """List collections (with IDs and parent sets) and collection sets"""
     execute_command(ctx, "catalog.getCollections", {})
 
 
@@ -326,14 +326,51 @@ def set_metadata(ctx, photo_id, key, value, dry_run, **kwargs):
     execute_command(ctx, "catalog.setMetadata", {"photoId": photo_id, "key": key, "value": value})
 
 
+def _parent_option(func):
+    """--parent-id / --parent-name options shared by collection commands"""
+    func = click.option("--parent-name", default=None, help="Exact name of the parent collection set")(func)
+    func = click.option("--parent-id", type=int, default=None, help="ID of the parent collection set")(func)
+    return func
+
+
+def _with_parent(params, parent_id, parent_name):
+    if parent_id is not None:
+        params["parentId"] = parent_id
+    if parent_name is not None:
+        params["parentName"] = parent_name
+    return params
+
+
+def _require_confirm(ctx, confirm, dry_run, example):
+    """Return True when the command may proceed; otherwise print CONFIRMATION_REQUIRED and exit 2."""
+    if confirm or dry_run:
+        return True
+    fmt = ctx.obj.get("output", "text") if ctx.obj else "text"
+    click.echo(
+        OutputFormatter.format_error(
+            "This operation is irreversible. Pass --confirm to proceed.",
+            fmt,
+            code="CONFIRMATION_REQUIRED",
+            suggestions=[
+                f"Add --confirm flag: {example} --confirm",
+                f"Use --dry-run first to preview: {example} --dry-run",
+            ],
+        ),
+        err=True,
+    )
+    ctx.exit(2)
+    return False
+
+
 @catalog.command("create-collection")
 @click.argument("name")
+@_parent_option
 @click.option("--dry-run", is_flag=True, default=False, help="Preview without executing")
 @json_input_options
 @click.pass_context
-def create_collection(ctx, name, dry_run, **kwargs):
-    """Create a new collection"""
-    execute_command(ctx, "catalog.createCollection", {"name": name})
+def create_collection(ctx, name, parent_id, parent_name, dry_run, **kwargs):
+    """Create a collection, optionally inside a collection set (idempotent)"""
+    execute_command(ctx, "catalog.createCollection", _with_parent({"name": name}, parent_id, parent_name))
 
 
 @catalog.command("create-smart-collection")
@@ -357,12 +394,88 @@ def create_smart_collection(ctx, name, search_desc, dry_run, **kwargs):
 
 @catalog.command("create-collection-set")
 @click.argument("name")
+@_parent_option
 @click.option("--dry-run", is_flag=True, default=False, help="Preview without executing")
 @json_input_options
 @click.pass_context
-def create_collection_set(ctx, name, dry_run, **kwargs):
-    """Create a collection set"""
-    execute_command(ctx, "catalog.createCollectionSet", {"name": name})
+def create_collection_set(ctx, name, parent_id, parent_name, dry_run, **kwargs):
+    """Create a collection set, optionally inside another set (idempotent)"""
+    execute_command(ctx, "catalog.createCollectionSet", _with_parent({"name": name}, parent_id, parent_name))
+
+
+def _collection_target_options(func):
+    """--collection-id / --collection (+ parent) options for membership commands"""
+    func = _parent_option(func)
+    func = click.option("--collection", "collection_name", default=None, help="Exact collection name")(func)
+    func = click.option("--collection-id", type=int, default=None, help="Collection ID")(func)
+    return func
+
+
+def _membership_params(photo_ids, collection_id, collection_name, parent_id, parent_name):
+    params = {"photoIds": list(photo_ids)}
+    if collection_id is not None:
+        params["collectionId"] = collection_id
+    if collection_name is not None:
+        params["collectionName"] = collection_name
+    return _with_parent(params, parent_id, parent_name)
+
+
+@catalog.command("add-to-collection")
+@click.argument("photo_ids", nargs=-1, required=True)
+@_collection_target_options
+@click.option("--dry-run", is_flag=True, default=False, help="Preview without executing")
+@json_input_options
+@click.pass_context
+def add_to_collection(ctx, photo_ids, collection_id, collection_name, parent_id, parent_name, dry_run, **kwargs):
+    """Add photos to a collection (--collection-id, or --collection NAME [--parent-name SET])"""
+    execute_command(
+        ctx,
+        "catalog.addPhotosToCollection",
+        _membership_params(photo_ids, collection_id, collection_name, parent_id, parent_name),
+        timeout=60.0,
+    )
+
+
+@catalog.command("remove-from-collection")
+@click.argument("photo_ids", nargs=-1, required=True)
+@_collection_target_options
+@click.option("--dry-run", is_flag=True, default=False, help="Preview without executing")
+@json_input_options
+@click.pass_context
+def remove_from_collection(ctx, photo_ids, collection_id, collection_name, parent_id, parent_name, dry_run, **kwargs):
+    """Remove photos from a collection (photos stay in the catalog)"""
+    execute_command(
+        ctx,
+        "catalog.removePhotosFromCollection",
+        _membership_params(photo_ids, collection_id, collection_name, parent_id, parent_name),
+        timeout=60.0,
+    )
+
+
+@catalog.command("delete-collection")
+@click.argument("collection_id", type=int)
+@click.option("--confirm", is_flag=True, default=False, help="Required confirmation flag")
+@click.option("--dry-run", is_flag=True, default=False, help="Preview without executing")
+@json_input_options
+@click.pass_context
+def delete_collection(ctx, collection_id, confirm, dry_run, **kwargs):
+    """Delete a collection (photos stay in the catalog, requires --confirm)"""
+    if not _require_confirm(ctx, confirm, dry_run, f"lr catalog delete-collection {collection_id}"):
+        return
+    execute_command(ctx, "catalog.deleteCollection", {"collectionId": collection_id})
+
+
+@catalog.command("delete-collection-set")
+@click.argument("collection_set_id", type=int)
+@click.option("--confirm", is_flag=True, default=False, help="Required confirmation flag")
+@click.option("--dry-run", is_flag=True, default=False, help="Preview without executing")
+@json_input_options
+@click.pass_context
+def delete_collection_set(ctx, collection_set_id, confirm, dry_run, **kwargs):
+    """Delete an empty collection set (requires --confirm)"""
+    if not _require_confirm(ctx, confirm, dry_run, f"lr catalog delete-collection-set {collection_set_id}"):
+        return
+    execute_command(ctx, "catalog.deleteCollectionSet", {"collectionSetId": collection_set_id})
 
 
 @catalog.command("create-keyword")

@@ -773,7 +773,151 @@ function CatalogModule.findPhotos(params, callback)
     callback({ result = responseResult })
 end
 
--- Get collections in catalog
+-- ---------------------------------------------------------------------------
+-- Collection tree helpers
+-- Walk regular/smart collections and collection sets (published collections
+-- are not included, matching catalog:getChildCollections()).
+-- Must be called inside catalog:withReadAccessDo / withWriteAccessDo.
+-- ---------------------------------------------------------------------------
+
+local function walkCollectionTree(catalog, visitor)
+    local function walk(container, parent, parentPath)
+        for _, set in ipairs(container:getChildCollectionSets() or {}) do
+            local name = set:getName()
+            local path = parentPath and (parentPath .. "/" .. name) or name
+            visitor("set", set, parent, path)
+            walk(set, set, path)
+        end
+        for _, collection in ipairs(container:getChildCollections() or {}) do
+            local name = collection:getName()
+            local path = parentPath and (parentPath .. "/" .. name) or name
+            visitor("collection", collection, parent, path)
+        end
+    end
+    walk(catalog, nil, nil)
+end
+
+-- Return a list of { object = ..., path = ... } for nodes of `kind` matching `predicate`
+local function findInCollectionTree(catalog, kind, predicate)
+    local matches = {}
+    walkCollectionTree(catalog, function(nodeKind, node, _, path)
+        if nodeKind == kind and predicate(node) then
+            table.insert(matches, { object = node, path = path })
+        end
+    end)
+    return matches
+end
+
+local function describeMatches(matches)
+    local parts = {}
+    for _, m in ipairs(matches) do
+        table.insert(parts, tostring(m.object.localIdentifier) .. " (" .. m.path .. ")")
+    end
+    return table.concat(parts, ", ")
+end
+
+-- Resolve the optional parent collection set from params.parentId / params.parentName.
+-- Returns set (or nil for top level), errorTable
+local function resolveParentSet(catalog, params)
+    if params.parentId ~= nil and params.parentName ~= nil then
+        return nil, { code = "INVALID_PARAM", message = "Pass parentId or parentName, not both" }
+    end
+    if params.parentId ~= nil then
+        local parentId = tonumber(params.parentId)
+        if not parentId then
+            return nil, { code = "INVALID_PARAM", message = "parentId must be a number" }
+        end
+        local matches = findInCollectionTree(catalog, "set", function(set)
+            return set.localIdentifier == parentId
+        end)
+        if #matches == 0 then
+            return nil, { code = "COLLECTION_SET_NOT_FOUND", message = "Collection set not found: " .. tostring(parentId) }
+        end
+        return matches[1].object
+    end
+    if params.parentName ~= nil then
+        local matches = findInCollectionTree(catalog, "set", function(set)
+            return set:getName() == params.parentName
+        end)
+        if #matches == 0 then
+            return nil, { code = "COLLECTION_SET_NOT_FOUND", message = "Collection set not found: " .. tostring(params.parentName) }
+        end
+        if #matches > 1 then
+            return nil, { code = "AMBIGUOUS_NAME", message = "Several collection sets are named '"
+                .. params.parentName .. "'; use parentId instead: " .. describeMatches(matches) }
+        end
+        return matches[1].object
+    end
+    return nil
+end
+
+-- Find a direct child (collection or set) of `parentSet` (or of the catalog root) by exact name
+local function findChildByName(catalog, parentSet, kind, name)
+    local container = parentSet or catalog
+    local children
+    if kind == "set" then
+        children = container:getChildCollectionSets() or {}
+    else
+        children = container:getChildCollections() or {}
+    end
+    for _, child in ipairs(children) do
+        if child:getName() == name then
+            return child
+        end
+    end
+    return nil
+end
+
+-- Resolve a collection from params.collectionId, or params.collectionName
+-- (optionally scoped to the parent set given by parentId / parentName).
+-- Returns collection, errorTable
+local function resolveCollection(catalog, params)
+    if params.collectionId ~= nil and params.collectionName ~= nil then
+        return nil, { code = "INVALID_PARAM", message = "Pass collectionId or collectionName, not both" }
+    end
+    if params.collectionId ~= nil then
+        local collectionId = tonumber(params.collectionId)
+        if not collectionId then
+            return nil, { code = "INVALID_PARAM", message = "collectionId must be a number" }
+        end
+        local matches = findInCollectionTree(catalog, "collection", function(collection)
+            return collection.localIdentifier == collectionId
+        end)
+        if #matches == 0 then
+            return nil, { code = "COLLECTION_NOT_FOUND", message = "Collection not found: " .. tostring(collectionId) }
+        end
+        return matches[1].object
+    end
+    if params.collectionName ~= nil then
+        local name = params.collectionName
+        if params.parentId ~= nil or params.parentName ~= nil then
+            local parentSet, parentErr = resolveParentSet(catalog, params)
+            if parentErr then
+                return nil, parentErr
+            end
+            local collection = findChildByName(catalog, parentSet, "collection", name)
+            if not collection then
+                return nil, { code = "COLLECTION_NOT_FOUND", message = "Collection '" .. name .. "' not found in "
+                    .. parentSet:getName() }
+            end
+            return collection
+        end
+        local matches = findInCollectionTree(catalog, "collection", function(collection)
+            return collection:getName() == name
+        end)
+        if #matches == 0 then
+            return nil, { code = "COLLECTION_NOT_FOUND", message = "Collection not found: " .. name }
+        end
+        if #matches > 1 then
+            return nil, { code = "AMBIGUOUS_NAME", message = "Several collections are named '" .. name
+                .. "'; use collectionId or a parent set: " .. describeMatches(matches) }
+        end
+        return matches[1].object
+    end
+    return nil, { code = "MISSING_PARAM", message = "collectionId or collectionName is required" }
+end
+
+-- Get collections in catalog (including collections nested in collection sets)
 function CatalogModule.getCollections(params, callback)
     ensureLrModules()
     local logger = getLogger()
@@ -783,35 +927,46 @@ function CatalogModule.getCollections(params, callback)
     local catalog = LrApplication.activeCatalog()
     local includePhotoCounts = params and params.includePhotoCounts
 
-    local collections
-    catalog:withReadAccessDo(function()
-        collections = catalog:getChildCollections()
-    end)
-
+    local collectionObjects = {}
     local resultCollections = {}
-    local COLLECTION_CHUNK_SIZE = 50
-    for chunkStart = 1, #collections, COLLECTION_CHUNK_SIZE do
-        local chunkEnd = math.min(chunkStart + COLLECTION_CHUNK_SIZE - 1, #collections)
-        catalog:withReadAccessDo(function()
-            for i = chunkStart, chunkEnd do
-                local collection = collections[i]
-                local entry = {
-                    id = collection.localIdentifier,
-                    name = collection:getName(),
-                    type = collection:type(),
-                }
-                if includePhotoCounts then
-                    entry.photoCount = #collection:getPhotos()
-                end
+    local resultSets = {}
+    catalog:withReadAccessDo(function()
+        walkCollectionTree(catalog, function(kind, node, parent, path)
+            local entry = {
+                id = node.localIdentifier,
+                name = node:getName(),
+                path = path,
+                parentId = parent and parent.localIdentifier or nil,
+                parentName = parent and parent:getName() or nil,
+            }
+            if kind == "set" then
+                table.insert(resultSets, entry)
+            else
+                entry.type = node:type()
+                entry.isSmart = node:isSmartCollection()
                 table.insert(resultCollections, entry)
+                table.insert(collectionObjects, node)
             end
         end)
-        LrTasks.yield()
+    end)
+
+    if includePhotoCounts then
+        local COLLECTION_CHUNK_SIZE = 50
+        for chunkStart = 1, #collectionObjects, COLLECTION_CHUNK_SIZE do
+            local chunkEnd = math.min(chunkStart + COLLECTION_CHUNK_SIZE - 1, #collectionObjects)
+            catalog:withReadAccessDo(function()
+                for i = chunkStart, chunkEnd do
+                    resultCollections[i].photoCount = #collectionObjects[i]:getPhotos()
+                end
+            end)
+            LrTasks.yield()
+        end
     end
 
     callback({
         result = {
             collections = resultCollections,
+            collectionSets = resultSets,
             count = #resultCollections
         }
     })
@@ -1506,24 +1661,90 @@ function CatalogModule.setMetadata(params, callback)
     end, { timeout = 10 })
 end
 
-function CatalogModule.createCollection(params, callback)
+-- ---------------------------------------------------------------------------
+-- Collection write operations
+-- ---------------------------------------------------------------------------
+
+local COLLECTION_WRITE_TIMEOUT = 30
+
+-- Run fn inside a catalog write transaction. Returns ok, errorTable
+local function withCollectionWrite(catalog, actionName, fn)
+    local status
+    local ok, err = ErrorUtils.safeCall(function()
+        status = catalog:withWriteAccessDo(actionName, fn, { timeout = COLLECTION_WRITE_TIMEOUT })
+    end)
+    if not ok then
+        return false, { code = "OPERATION_FAILED", message = tostring(err) }
+    end
+    if status == "aborted" then
+        return false, { code = "CATALOG_BUSY",
+            message = "Timed out waiting for catalog write access (Lightroom is busy); try again" }
+    end
+    return true
+end
+
+local function createCollectionOrSet(params, callback, kind)
     ensureLrModules()
-    local name = params.name
-    if not name then
-        callback(ErrorUtils.createError("MISSING_PARAM", "Collection name is required"))
+    local label = kind == "set" and "Collection set" or "Collection"
+    local name = params and params.name
+    if not name or name == "" then
+        callback(ErrorUtils.createError("MISSING_PARAM", label .. " name is required"))
         return
     end
+
     local catalog = LrApplication.activeCatalog()
-    local success, err = ErrorUtils.safeCall(function()
-        catalog:withWriteAccessDo("Create Collection", function()
-            catalog:createCollection(name, nil, true)
-        end, { timeout = 10 })
+    local parentSet, parentErr, existed
+    catalog:withReadAccessDo(function()
+        parentSet, parentErr = resolveParentSet(catalog, params)
+        if not parentErr then
+            existed = findChildByName(catalog, parentSet, kind, name) ~= nil
+        end
     end)
-    if success then
-        callback(ErrorUtils.createSuccess({ name = name, message = "Collection created" }))
-    else
-        callback(ErrorUtils.createError("OPERATION_FAILED", tostring(err)))
+    if parentErr then
+        callback(ErrorUtils.createError(parentErr.code, parentErr.message))
+        return
     end
+
+    -- canReturnPrior = true: re-running returns the existing collection/set instead of failing
+    local created
+    local ok, writeErr = withCollectionWrite(catalog, "Create " .. label, function()
+        if kind == "set" then
+            created = catalog:createCollectionSet(name, parentSet, true)
+        else
+            created = catalog:createCollection(name, parentSet, true)
+        end
+    end)
+    if not ok then
+        callback(ErrorUtils.createError(writeErr.code, writeErr.message))
+        return
+    end
+    if not created then
+        callback(ErrorUtils.createError("OPERATION_FAILED", "Lightroom did not return the " .. string.lower(label)))
+        return
+    end
+
+    local result = {
+        name = name,
+        existed = existed,
+        message = existed and (label .. " already exists") or (label .. " created"),
+    }
+    catalog:withReadAccessDo(function()
+        local id = created.localIdentifier
+        if not id then
+            local again = findChildByName(catalog, parentSet, kind, name)
+            id = again and again.localIdentifier
+        end
+        result.id = id
+        if parentSet then
+            result.parentId = parentSet.localIdentifier
+            result.parentName = parentSet:getName()
+        end
+    end)
+    callback(ErrorUtils.createSuccess(result))
+end
+
+function CatalogModule.createCollection(params, callback)
+    createCollectionOrSet(params, callback, "collection")
 end
 
 function CatalogModule.createSmartCollection(params, callback)
@@ -1548,23 +1769,203 @@ function CatalogModule.createSmartCollection(params, callback)
 end
 
 function CatalogModule.createCollectionSet(params, callback)
+    createCollectionOrSet(params, callback, "set")
+end
+
+-- Add or remove photos from a regular collection. mode: "add" | "remove"
+local function changeCollectionMembership(params, callback, mode)
     ensureLrModules()
-    local name = params.name
-    if not name then
-        callback(ErrorUtils.createError("MISSING_PARAM", "Collection set name is required"))
+    params = params or {}
+    local photoIds = params.photoIds
+    if type(photoIds) ~= "table" or #photoIds == 0 then
+        callback(ErrorUtils.createError("MISSING_PARAM", "photoIds must be a non-empty array"))
         return
     end
+
     local catalog = LrApplication.activeCatalog()
-    local success, err = ErrorUtils.safeCall(function()
-        catalog:withWriteAccessDo("Create Collection Set", function()
-            catalog:createCollectionSet(name, nil, true)
-        end, { timeout = 10 })
+    local collection, lookupErr
+    local toChange = {}
+    local unchanged = {}
+    local notFound = {}
+    local collectionName, collectionId
+
+    local readOk, readErr = ErrorUtils.safeCall(function()
+        catalog:withReadAccessDo(function()
+            collection, lookupErr = resolveCollection(catalog, params)
+            if lookupErr then
+                return
+            end
+            if collection:isSmartCollection() then
+                lookupErr = { code = "SMART_COLLECTION",
+                    message = "Smart collections are rule-based; photos cannot be added or removed directly" }
+                return
+            end
+            collectionName = collection:getName()
+            collectionId = collection.localIdentifier
+
+            local inCollection = {}
+            for _, photo in ipairs(collection:getPhotos() or {}) do
+                inCollection[photo.localIdentifier] = true
+            end
+
+            local seen = {}
+            for _, photoId in ipairs(photoIds) do
+                local numericId = tonumber(photoId)
+                if numericId and not seen[numericId] then
+                    seen[numericId] = true
+                    local photo = catalog:getPhotoByLocalId(numericId)
+                    if not photo then
+                        table.insert(notFound, photoId)
+                    elseif (mode == "add") ~= (inCollection[numericId] == true) then
+                        table.insert(toChange, photo)
+                    else
+                        table.insert(unchanged, photoId)
+                    end
+                elseif not numericId then
+                    table.insert(notFound, photoId)
+                end
+            end
+        end)
     end)
-    if success then
-        callback(ErrorUtils.createSuccess({ name = name, message = "Collection set created" }))
-    else
-        callback(ErrorUtils.createError("OPERATION_FAILED", tostring(err)))
+    if not readOk then
+        callback(ErrorUtils.createError("OPERATION_FAILED", tostring(readErr)))
+        return
     end
+    if lookupErr then
+        callback(ErrorUtils.createError(lookupErr.code, lookupErr.message))
+        return
+    end
+
+    if #toChange > 0 then
+        local actionName = mode == "add" and "Add Photos to Collection" or "Remove Photos from Collection"
+        local ok, writeErr = withCollectionWrite(catalog, actionName, function()
+            if mode == "add" then
+                collection:addPhotos(toChange)
+            else
+                collection:removePhotos(toChange)
+            end
+        end)
+        if not ok then
+            callback(ErrorUtils.createError(writeErr.code, writeErr.message))
+            return
+        end
+    end
+
+    local photoCount
+    catalog:withReadAccessDo(function()
+        photoCount = #(collection:getPhotos() or {})
+    end)
+
+    local result = {
+        collectionId = collectionId,
+        collectionName = collectionName,
+        requested = #photoIds,
+        notFound = notFound,
+        photoCount = photoCount,
+    }
+    if mode == "add" then
+        result.added = #toChange
+        result.alreadyInCollection = unchanged
+        result.message = "Added " .. #toChange .. " photo(s) to collection"
+    else
+        result.removed = #toChange
+        result.notInCollection = unchanged
+        result.message = "Removed " .. #toChange .. " photo(s) from collection (photos stay in the catalog)"
+    end
+    callback(ErrorUtils.createSuccess(result))
+end
+
+function CatalogModule.addPhotosToCollection(params, callback)
+    changeCollectionMembership(params, callback, "add")
+end
+
+function CatalogModule.removePhotosFromCollection(params, callback)
+    changeCollectionMembership(params, callback, "remove")
+end
+
+-- Delete a regular or smart collection. Photos are never removed from the catalog.
+function CatalogModule.deleteCollection(params, callback)
+    ensureLrModules()
+    if not params or params.collectionId == nil then
+        callback(ErrorUtils.createError("MISSING_PARAM", "collectionId is required"))
+        return
+    end
+
+    local catalog = LrApplication.activeCatalog()
+    local collection, lookupErr, name, photoCount
+    catalog:withReadAccessDo(function()
+        collection, lookupErr = resolveCollection(catalog, { collectionId = params.collectionId })
+        if collection then
+            name = collection:getName()
+            photoCount = #(collection:getPhotos() or {})
+        end
+    end)
+    if lookupErr then
+        callback(ErrorUtils.createError(lookupErr.code, lookupErr.message))
+        return
+    end
+
+    local ok, writeErr = withCollectionWrite(catalog, "Delete Collection", function()
+        collection:delete()
+    end)
+    if not ok then
+        callback(ErrorUtils.createError(writeErr.code, writeErr.message))
+        return
+    end
+    callback(ErrorUtils.createSuccess({
+        id = tonumber(params.collectionId),
+        name = name,
+        photoCount = photoCount,
+        deleted = true,
+        message = "Collection deleted (its photos remain in the catalog)",
+    }))
+end
+
+-- Delete an empty collection set. Refuses non-empty sets so nested collections are never lost.
+function CatalogModule.deleteCollectionSet(params, callback)
+    ensureLrModules()
+    local setId = params and tonumber(params.collectionSetId)
+    if not setId then
+        callback(ErrorUtils.createError("MISSING_PARAM", "collectionSetId is required"))
+        return
+    end
+
+    local catalog = LrApplication.activeCatalog()
+    local set, name, childCount
+    catalog:withReadAccessDo(function()
+        local matches = findInCollectionTree(catalog, "set", function(node)
+            return node.localIdentifier == setId
+        end)
+        if #matches > 0 then
+            set = matches[1].object
+            name = set:getName()
+            childCount = #(set:getChildCollections() or {}) + #(set:getChildCollectionSets() or {})
+        end
+    end)
+    if not set then
+        callback(ErrorUtils.createError("COLLECTION_SET_NOT_FOUND", "Collection set not found: " .. tostring(setId)))
+        return
+    end
+    if childCount > 0 then
+        callback(ErrorUtils.createError("COLLECTION_SET_NOT_EMPTY",
+            "Collection set '" .. name .. "' still contains " .. childCount
+            .. " collection(s) or set(s); delete those first"))
+        return
+    end
+
+    local ok, writeErr = withCollectionWrite(catalog, "Delete Collection Set", function()
+        set:delete()
+    end)
+    if not ok then
+        callback(ErrorUtils.createError(writeErr.code, writeErr.message))
+        return
+    end
+    callback(ErrorUtils.createSuccess({
+        id = setId,
+        name = name,
+        deleted = true,
+        message = "Collection set deleted",
+    }))
 end
 
 function CatalogModule.createKeyword(params, callback)
@@ -1709,16 +2110,10 @@ function CatalogModule.getCollectionPhotos(params, callback)
 
     local catalog = LrApplication.activeCatalog()
 
-    -- Find the collection by ID
+    -- Find the collection by ID (including collections nested in collection sets)
     local targetCollection = nil
     catalog:withReadAccessDo(function()
-        local collections = catalog:getChildCollections()
-        for _, collection in ipairs(collections) do
-            if collection.localIdentifier == collectionId then
-                targetCollection = collection
-                break
-            end
-        end
+        targetCollection = resolveCollection(catalog, { collectionId = collectionId })
     end)
 
     if not targetCollection then

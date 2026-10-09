@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **`catalog add-to-collection` / `catalog remove-from-collection`** — change collection membership by collection ID, or exact name plus optional parent set; reports added/removed counts and photo IDs not found
+- **`catalog delete-collection` / `catalog delete-collection-set`** — delete a collection (photos stay in the catalog) or an empty collection set; both require `--confirm`
+- **`--parent-id` / `--parent-name`** on `catalog create-collection` and `catalog create-collection-set`; both now return the collection's `id` and whether it `existed`
+
+### Changed
+- `catalog collections` now includes collections nested inside collection sets, with `parentId`, `parentName`, `path` and `isSmart`, plus a `collectionSets` list
+- `catalog collection-photos` can find collections nested inside collection sets
+
 ## [1.2.2] - 2026-04-06
 
 ### Fixed

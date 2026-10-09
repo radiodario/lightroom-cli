@@ -204,8 +204,11 @@ lr catalog get-info <photo_id>        # 詳細メタデータ
 lr catalog set-rating <id> 5          # レーティング設定
 lr catalog add-keywords <id> kw1 kw2  # キーワード追加
 lr catalog set-title <id> "Title"     # タイトル設定
-lr catalog collections                # コレクション一覧
-lr catalog create-collection "name"   # コレクション作成
+lr catalog collections                # コレクション/コレクションセット一覧（ID・親セット付き）
+lr catalog create-collection "name"   # コレクション作成（--parent-id/--parent-name で親セット指定）
+lr catalog add-to-collection <id>... --collection-id <cid>   # 写真を追加
+lr catalog remove-from-collection <id>... --collection-id <cid>
+lr catalog delete-collection <cid> --confirm                 # 写真はカタログに残る
 lr catalog keywords                   # キーワード一覧
 lr catalog set-view-filter <json>     # ビューフィルタ設定
 lr catalog rotate-left                # 左回転

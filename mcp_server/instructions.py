@@ -50,6 +50,12 @@ All tool names use the `lr_` prefix with snake_case (e.g., `lr_system_ping`, `lr
 3. `lr_catalog_add_keywords` - Add keywords
 4. `lr_catalog_set_flag` - Set flag (1=pick, -1=reject, 0=none)
 
+### Collections
+1. `lr_catalog_get_collections` - List collections and collection sets with IDs and parents
+2. `lr_catalog_create_collection_set` / `lr_catalog_create_collection` - Create (optionally inside `parentId`/`parentName`); idempotent, returns `id`
+3. `lr_catalog_add_photos_to_collection` / `lr_catalog_remove_photos_from_collection` - Change membership by `collectionId` (or `collectionName` + parent)
+4. `lr_catalog_delete_collection` / `lr_catalog_delete_collection_set` - Delete (photos are never removed from the catalog; sets must be empty)
+
 ## Safety
 
 - **Mutating commands** modify photos/catalog. Check `[mutating]` in tool description.
