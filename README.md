@@ -204,8 +204,11 @@ lr catalog get-info <photo_id>        # Detailed metadata
 lr catalog set-rating <id> 5          # Set rating
 lr catalog add-keywords <id> kw1 kw2  # Add keywords
 lr catalog set-title <id> "Title"     # Set title
-lr catalog collections                # List collections
-lr catalog create-collection "name"   # Create collection
+lr catalog collections                # List collections and sets (IDs, parents)
+lr catalog create-collection "name"   # Create collection (--parent-id/--parent-name SET)
+lr catalog add-to-collection <id>... --collection-id <cid>   # Add photos
+lr catalog remove-from-collection <id>... --collection-id <cid>
+lr catalog delete-collection <cid> --confirm                 # Photos stay in catalog
 lr catalog keywords                   # List keywords
 lr catalog set-view-filter <json>     # Set view filter
 lr catalog rotate-left                # Rotate left

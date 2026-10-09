@@ -1171,8 +1171,8 @@ _register(
     CommandSchema(
         "catalog.getCollections",
         "catalog.collections",
-        "List collections in catalog",
-        response_fields=["collections"],
+        "List collections (including those nested in collection sets) and collection sets",
+        response_fields=["collections", "collectionSets", "count"],
     ),
     CommandSchema(
         "catalog.getCollectionPhotos",
@@ -1365,10 +1365,23 @@ _register(
     CommandSchema(
         "catalog.createCollection",
         "catalog.create-collection",
-        "Create a new collection",
-        params=[ParamSchema("name", ParamType.STRING, required=True, description="Collection name")],
+        "Create a collection, optionally inside a collection set (returns the existing one if present)",
+        params=[
+            ParamSchema("name", ParamType.STRING, required=True, description="Collection name"),
+            ParamSchema(
+                "parentId",
+                ParamType.INTEGER,
+                description="ID of the parent collection set (obtain via catalog collections)",
+            ),
+            ParamSchema(
+                "parentName",
+                ParamType.STRING,
+                description="Exact name of the parent collection set (alternative to parentId)",
+            ),
+        ],
         mutating=True,
         supports_dry_run=True,
+        response_fields=["id", "name", "existed", "parentId", "parentName"],
     ),
     CommandSchema(
         "catalog.createSmartCollection",
@@ -1393,17 +1406,136 @@ _register(
     CommandSchema(
         "catalog.createCollectionSet",
         "catalog.create-collection-set",
-        "Create a collection set",
+        "Create a collection set, optionally inside another set (returns the existing one if present)",
         params=[
             ParamSchema(
                 "name",
                 ParamType.STRING,
                 required=True,
                 description="Collection set name",
-            )
+            ),
+            ParamSchema(
+                "parentId",
+                ParamType.INTEGER,
+                description="ID of the parent collection set (obtain via catalog collections)",
+            ),
+            ParamSchema(
+                "parentName",
+                ParamType.STRING,
+                description="Exact name of the parent collection set (alternative to parentId)",
+            ),
         ],
         mutating=True,
         supports_dry_run=True,
+        response_fields=["id", "name", "existed", "parentId", "parentName"],
+    ),
+    CommandSchema(
+        "catalog.addPhotosToCollection",
+        "catalog.add-to-collection",
+        "Add photos to a collection (by collection ID, or exact name plus optional parent set)",
+        params=[
+            ParamSchema(
+                "photoIds",
+                ParamType.JSON_ARRAY,
+                required=True,
+                description="Array of photo IDs to add",
+            ),
+            ParamSchema(
+                "collectionId",
+                ParamType.INTEGER,
+                description="Collection ID (obtain via catalog collections)",
+            ),
+            ParamSchema(
+                "collectionName",
+                ParamType.STRING,
+                description="Exact collection name (alternative to collectionId)",
+            ),
+            ParamSchema(
+                "parentId",
+                ParamType.INTEGER,
+                description="Parent set ID, to disambiguate collectionName",
+            ),
+            ParamSchema(
+                "parentName",
+                ParamType.STRING,
+                description="Parent set name, to disambiguate collectionName",
+            ),
+        ],
+        mutating=True,
+        timeout=60.0,
+        supports_dry_run=True,
+        response_fields=["collectionId", "collectionName", "added", "alreadyInCollection", "notFound", "photoCount"],
+    ),
+    CommandSchema(
+        "catalog.removePhotosFromCollection",
+        "catalog.remove-from-collection",
+        "Remove photos from a collection (photos stay in the catalog)",
+        params=[
+            ParamSchema(
+                "photoIds",
+                ParamType.JSON_ARRAY,
+                required=True,
+                description="Array of photo IDs to remove from the collection",
+            ),
+            ParamSchema(
+                "collectionId",
+                ParamType.INTEGER,
+                description="Collection ID (obtain via catalog collections)",
+            ),
+            ParamSchema(
+                "collectionName",
+                ParamType.STRING,
+                description="Exact collection name (alternative to collectionId)",
+            ),
+            ParamSchema(
+                "parentId",
+                ParamType.INTEGER,
+                description="Parent set ID, to disambiguate collectionName",
+            ),
+            ParamSchema(
+                "parentName",
+                ParamType.STRING,
+                description="Parent set name, to disambiguate collectionName",
+            ),
+        ],
+        mutating=True,
+        timeout=60.0,
+        supports_dry_run=True,
+        response_fields=["collectionId", "collectionName", "removed", "notInCollection", "notFound", "photoCount"],
+    ),
+    CommandSchema(
+        "catalog.deleteCollection",
+        "catalog.delete-collection",
+        "Delete a collection (its photos remain in the catalog)",
+        params=[
+            ParamSchema(
+                "collectionId",
+                ParamType.INTEGER,
+                required=True,
+                description="Collection ID to delete (obtain via catalog collections)",
+            ),
+        ],
+        mutating=True,
+        supports_dry_run=True,
+        requires_confirm=True,
+        response_fields=["id", "name", "deleted"],
+    ),
+    CommandSchema(
+        "catalog.deleteCollectionSet",
+        "catalog.delete-collection-set",
+        "Delete an empty collection set (refuses sets that still contain collections)",
+        params=[
+            ParamSchema(
+                "collectionSetId",
+                ParamType.INTEGER,
+                required=True,
+                description="Collection set ID to delete (obtain via catalog collections)",
+            ),
+        ],
+        mutating=True,
+        supports_dry_run=True,
+        requires_confirm=True,
+        response_fields=["id", "name", "deleted"],
     ),
     CommandSchema(
         "catalog.createKeyword",

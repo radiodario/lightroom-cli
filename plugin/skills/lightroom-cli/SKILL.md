@@ -239,6 +239,18 @@ lr -o json catalog collection-photos COLLECTION_ID       # Get photos from a col
 lr -o json catalog collection-photos 12345 --limit 100   # With pagination
 ```
 
+### Managing collections
+
+```bash
+lr -o json catalog create-collection-set "Trips"                        # Idempotent; returns id
+lr -o json catalog create-collection "Lisbon" --parent-name "Trips"     # Or --parent-id SET_ID
+lr -o json catalog add-to-collection 101 102 --collection-id 12345      # Reports added / notFound
+lr -o json catalog add-to-collection 101 --collection "Lisbon" --parent-name "Trips"
+lr -o json catalog remove-from-collection 101 --collection-id 12345     # Photos stay in catalog
+lr catalog delete-collection 12345 --confirm                            # Photos stay in catalog
+lr catalog delete-collection-set 678 --confirm                          # Only empty sets
+```
+
 ### Other limitations
 
 - **Preview = file path**: `lr preview generate` returns a file path on disk, not image data

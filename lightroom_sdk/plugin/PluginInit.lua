@@ -202,7 +202,7 @@ local function registerSystemCommands()
             result = {
                 pong = true,
                 timestamp = os.time(),
-                version = "1.2.1",
+                version = "1.2.2",
                 protocolVersion = "1"
             }
         })
@@ -372,6 +372,10 @@ local function registerApiCommands()
     router:register("catalog.createCollection", CatalogModule.createCollection, "sync")
     router:register("catalog.createSmartCollection", CatalogModule.createSmartCollection, "sync")
     router:register("catalog.createCollectionSet", CatalogModule.createCollectionSet, "sync")
+    router:register("catalog.addPhotosToCollection", CatalogModule.addPhotosToCollection, "sync")
+    router:register("catalog.removePhotosFromCollection", CatalogModule.removePhotosFromCollection, "sync")
+    router:register("catalog.deleteCollection", CatalogModule.deleteCollection, "sync")
+    router:register("catalog.deleteCollectionSet", CatalogModule.deleteCollectionSet, "sync")
     router:register("catalog.createKeyword", CatalogModule.createKeyword, "sync")
     router:register("catalog.removeKeyword", CatalogModule.removeKeyword, "sync")
     router:register("catalog.setViewFilter", CatalogModule.setViewFilter, "sync")
